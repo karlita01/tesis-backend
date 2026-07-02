@@ -76,7 +76,23 @@ def detener_monitoreo(
     # Guardar resultado de análisis en BD si había una sesión webcam activa
     estado = eliminar_estado(sesion_id)
     if estado and estado.frames_procesados > 0:
+        import os
+        import logging
         zona_id = sesion[5]  # sesion[5] = zona_exclusion_id
+
+        # RF-5.2: persistir frame con mayor concentración si existe
+        evidencia_path = None
+        if estado.frame_evidencia_bytes:
+            try:
+                os.makedirs("uploads/evidencias", exist_ok=True)
+                evidencia_path = f"uploads/evidencias/sesion_{sesion_id}.jpg"
+                with open(evidencia_path, "wb") as f:
+                    f.write(estado.frame_evidencia_bytes)
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "Error al guardar frame de evidencia (sesion_id=%s)", sesion_id
+                )
+
         analisis_repo.save_resultado(
             sesion_id=sesion_id,
             zona_config_id=zona_id,
@@ -87,6 +103,7 @@ def detener_monitoreo(
             frames_procesados=estado.frames_procesados,
             inicio_analisis=datetime.datetime.fromtimestamp(estado.inicio).isoformat(),
             fin_analisis=datetime.datetime.now().isoformat(),
+            frame_evidencia=evidencia_path,
         )
 
     sesion = monitoreo_repo.detener_sesion(sesion_id)

@@ -116,6 +116,27 @@ CREATE TABLE IF NOT EXISTS resultados_analisis (
 CREATE INDEX IF NOT EXISTS idx_resultados_sesion ON resultados_analisis (sesion_id);
 
 -- =============================================================
+-- EP-004 — Alertas de aglomeración
+-- =============================================================
+
+CREATE TABLE IF NOT EXISTS alertas (
+    id              SERIAL PRIMARY KEY,
+    sesion_id       INTEGER      REFERENCES sesiones_monitoreo(id) ON DELETE CASCADE,
+    usuario_id      INTEGER      REFERENCES usuarios(id) ON DELETE SET NULL,
+    zona_config_id  INTEGER      REFERENCES configuraciones_zonas_exclusion(id) ON DELETE SET NULL,
+    nivel           VARCHAR(20)  NOT NULL DEFAULT 'alto'
+                        CHECK (nivel IN ('bajo', 'medio', 'alto')),
+    personas        INTEGER      NOT NULL DEFAULT 0,
+    atendida        BOOLEAN      NOT NULL DEFAULT FALSE,
+    fecha_alerta    TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    fecha_atencion  TIMESTAMP WITH TIME ZONE
+);
+
+CREATE INDEX IF NOT EXISTS idx_alertas_sesion   ON alertas (sesion_id);
+CREATE INDEX IF NOT EXISTS idx_alertas_usuario  ON alertas (usuario_id);
+CREATE INDEX IF NOT EXISTS idx_alertas_atendida ON alertas (atendida);
+
+-- =============================================================
 -- MIGRACIONES — ejecutar solo si la BD ya existe con el esquema anterior
 -- =============================================================
 
@@ -130,3 +151,6 @@ ALTER TABLE grabaciones ADD COLUMN IF NOT EXISTS fecha_grabacion TIMESTAMP WITH 
 
 -- Agregar zona_exclusion_id a sesiones_monitoreo
 ALTER TABLE sesiones_monitoreo ADD COLUMN IF NOT EXISTS zona_exclusion_id INTEGER;
+
+-- EP-005: frame de evidencia (captura del momento de mayor concentración)
+ALTER TABLE resultados_analisis ADD COLUMN IF NOT EXISTS frame_evidencia TEXT;

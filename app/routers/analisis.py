@@ -10,14 +10,22 @@ GET  /api/analisis/resultado/{id}   → resultado de una sesión específica
 import asyncio
 import datetime
 import json
+import logging
+import os
 import threading
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from app.core.security import require_auth
-from app.models.schemas import FrameAnalisisResult, HistorialAnalisisOut, ResultadoAnalisisOut
-from app.repositories import analisis_repo, grabacion_repo, monitoreo_repo, zona_exclusion_repo
+from app.core.sse_manager import alerta_manager
+from app.models.schemas import (
+    FrameAnalisisResult,
+    HistorialAnalisisOut,
+    ResultadoAnalisisOut,
+    ZonasCriticasOut,
+)
+from app.repositories import alerta_repo, analisis_repo, grabacion_repo, monitoreo_repo, zona_exclusion_repo
 from detector.yolo_detector import (
     crear_estado,
     eliminar_estado,
@@ -25,6 +33,8 @@ from detector.yolo_detector import (
     procesar_frame,
     procesar_video_sync,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/analisis", tags=["Análisis EP-003"])
 
@@ -45,14 +55,32 @@ def _zona_config_dict(zona_id: int | None) -> dict | None:
     }
 
 
+def _tipo_dia(dt) -> str | None:
+    if dt is None:
+        return None
+    dow = dt.weekday()  # 0=lunes … 6=domingo
+    return "Fin de semana" if dow >= 5 else "Laborable"
+
+
+def _save_evidencia(sesion_id: int, frame_bytes: bytes) -> str:
+    """Guarda el frame de evidencia en disco y devuelve la ruta relativa."""
+    os.makedirs("uploads/evidencias", exist_ok=True)
+    ruta = f"uploads/evidencias/sesion_{sesion_id}.jpg"
+    with open(ruta, "wb") as f:
+        f.write(frame_bytes)
+    return ruta
+
+
 def _row_resultado(r: tuple) -> dict:
     # 0=id, 1=sesion_id, 2=zona_config_id, 3=personas_maximas, 4=nivel_maximo,
     # 5=tiempo_primera_media_seg, 6=alerta_activada, 7=frames_procesados,
-    # 8=inicio_analisis, 9=fin_analisis, 10=fecha_registro
+    # 8=inicio_analisis, 9=fin_analisis, 10=fecha_registro, 11=frame_evidencia,
+    # 12=zona_nombre  (presente en queries con JOIN)
     return {
         "id": r[0],
         "sesion_id": r[1],
         "zona_config_id": r[2],
+        "zona_nombre": r[12] if len(r) > 12 else None,
         "personas_maximas": r[3],
         "nivel_maximo": r[4],
         "tiempo_primera_media_seg": r[5],
@@ -61,6 +89,8 @@ def _row_resultado(r: tuple) -> dict:
         "inicio_analisis": r[8].isoformat() if r[8] else None,
         "fin_analisis": r[9].isoformat() if r[9] else None,
         "fecha_registro": r[10].isoformat() if r[10] else None,
+        "frame_evidencia": r[11] if len(r) > 11 else None,
+        "tipo_dia": _tipo_dia(r[8]),
     }
 
 
@@ -101,8 +131,34 @@ async def analizar_frame(
         estado.umbral_alto,
     )
 
+    # RF-5.2: guardar frame si supera el máximo histórico de esta sesión
+    es_nuevo_maximo = resultado["personas"] > estado.personas_maximas
     alerta = estado.actualizar(resultado["personas"], resultado["nivel"])
+    if es_nuevo_maximo and resultado["personas"] > 0:
+        estado.frame_evidencia_bytes = frame_bytes
     resumen = estado.resumen()
+
+    # RF-4.3 / RF-4.1: guardar alerta en BD y notificar al cliente SSE
+    if alerta:
+        zona_id_activo = zona_config_id or sesion[5]
+        try:
+            db_alerta = alerta_repo.crear_alerta(
+                sesion_id=sesion_id,
+                usuario_id=int(payload["sub"]),
+                zona_config_id=zona_id_activo,
+                nivel="alto",
+                personas=resultado["personas"],
+            )
+            await alerta_manager.publish(int(payload["sub"]), {
+                "tipo": "alerta",
+                "id": db_alerta[0],
+                "sesion_id": sesion_id,
+                "nivel": "alto",
+                "personas": resultado["personas"],
+                "fecha_alerta": db_alerta[7].isoformat() if db_alerta[7] else None,
+            })
+        except Exception:
+            logger.exception("Error al guardar/publicar alerta (sesion_id=%s)", sesion_id)
 
     return {
         "sesion_id": sesion_id,
@@ -148,6 +204,7 @@ async def stream_analisis_video(
     ruta_video = grabacion[2]   # grabacion[2] = ruta_archivo
 
     zona_id = sesion[5]         # sesion[5] = zona_exclusion_id
+    usuario_id = sesion[1]      # sesion[1] = usuario_id
     config = _zona_config_dict(zona_id)
 
     # Eliminar estado previo si existe (re-análisis)
@@ -155,12 +212,35 @@ async def stream_analisis_video(
     estado = crear_estado(sesion_id, zona_config=config)
     inicio = datetime.datetime.now()
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue()
 
     def worker():
         def on_event(ev: dict):
             asyncio.run_coroutine_threadsafe(queue.put(ev), loop).result(timeout=30)
+
+            # RF-4.3 / RF-4.1: guardar alerta en BD y notificar SSE desde hilo
+            if ev.get("alerta"):
+                try:
+                    db_alerta = alerta_repo.crear_alerta(
+                        sesion_id=sesion_id,
+                        usuario_id=usuario_id,
+                        zona_config_id=zona_id,
+                        nivel="alto",
+                        personas=ev.get("personas", 0),
+                    )
+                    alerta_manager.publish_from_thread(usuario_id, {
+                        "tipo": "alerta",
+                        "id": db_alerta[0],
+                        "sesion_id": sesion_id,
+                        "nivel": "alto",
+                        "personas": ev.get("personas", 0),
+                        "fecha_alerta": db_alerta[7].isoformat() if db_alerta[7] else None,
+                    }, loop)
+                except Exception:
+                    logger.exception(
+                        "Error al guardar/publicar alerta en stream (sesion_id=%s)", sesion_id
+                    )
 
         try:
             procesar_video_sync(ruta_video, config, estado, callback=on_event)
@@ -174,19 +254,23 @@ async def stream_analisis_video(
     threading.Thread(target=worker, daemon=True).start()
 
     async def generate():
-        fin_recibido = False
         try:
             while True:
                 ev = await asyncio.wait_for(queue.get(), timeout=300)
                 if ev is None:
                     break
                 yield f"data: {json.dumps(ev)}\n\n"
-                if ev.get("tipo") == "fin":
-                    fin_recibido = True
         finally:
             # Guardar resultado en BD
             if estado.frames_procesados > 0:
                 fin_dt = datetime.datetime.now()
+                # RF-5.2: persistir frame de evidencia si existe
+                evidencia_path = None
+                if estado.frame_evidencia_bytes:
+                    try:
+                        evidencia_path = _save_evidencia(sesion_id, estado.frame_evidencia_bytes)
+                    except Exception:
+                        logger.exception("Error al guardar frame de evidencia (sesion_id=%s)", sesion_id)
                 analisis_repo.save_resultado(
                     sesion_id=sesion_id,
                     zona_config_id=zona_id,
@@ -197,6 +281,7 @@ async def stream_analisis_video(
                     frames_procesados=estado.frames_procesados,
                     inicio_analisis=inicio.isoformat(),
                     fin_analisis=fin_dt.isoformat(),
+                    frame_evidencia=evidencia_path,
                 )
             eliminar_estado(sesion_id)
 
@@ -236,3 +321,28 @@ def obtener_resultado(sesion_id: int, payload: dict = Depends(require_auth)):
     if row is None:
         raise HTTPException(status_code=404, detail="No hay resultado de análisis para esta sesión.")
     return _row_resultado(row)
+
+
+# ── GET /zonas-criticas ───────────────────────────────────────────────────────
+
+@router.get("/zonas-criticas", response_model=ZonasCriticasOut)
+def obtener_zonas_criticas(_: dict = Depends(require_auth)):
+    """
+    RF-5.5: Resumen agregado por sector (zona de exclusión).
+    Devuelve total de sesiones, sesiones con alerta, personas máximas
+    y promedio de personas por zona activa.
+    """
+    rows = analisis_repo.get_zonas_criticas()
+    return {
+        "zonas": [
+            {
+                "zona_id": r[0],
+                "zona_nombre": r[1],
+                "total_sesiones": r[2],
+                "sesiones_con_alerta": r[3],
+                "max_personas": r[4],
+                "promedio_personas": r[5],
+            }
+            for r in rows
+        ]
+    }

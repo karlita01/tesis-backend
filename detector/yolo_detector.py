@@ -214,6 +214,7 @@ class SesionAnalisisState:
         self.ultima_alerta: float | None = None
         self.frames_ventana: deque = deque()   # (timestamp, nivel)
         self.frames_procesados = 0
+        self.frame_evidencia_bytes: bytes | None = None  # RF-5.2
 
     def actualizar(self, personas: int, nivel: str) -> bool:
         """
@@ -330,10 +331,17 @@ def procesar_video_sync(
                 continue
 
             _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-            resultado = procesar_frame(buf.tobytes(), zonas_exc, umbral_m, umbral_a)
+            frame_bytes = buf.tobytes()
+            resultado = procesar_frame(frame_bytes, zonas_exc, umbral_m, umbral_a)
 
             ts_video = round(frame_num / fps, 2)
+            es_nuevo_maximo = resultado["personas"] > estado.personas_maximas
             alerta = estado.actualizar(resultado["personas"], resultado["nivel"])
+
+            # RF-5.2: guardar frame con mayor concentración detectada
+            if es_nuevo_maximo and resultado["personas"] > 0:
+                _, ev_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                estado.frame_evidencia_bytes = ev_buf.tobytes()
 
             callback({
                 "tipo": "frame",

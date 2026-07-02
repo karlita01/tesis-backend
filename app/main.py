@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
 from app.database import close_pool, init_pool
-from app.routers import analisis, auth, camaras, fuentes_video, grabaciones, monitoreo, zonas_exclusion
+from app.routers import alertas, analisis, auth, camaras, fuentes_video, grabaciones, monitoreo, zonas_exclusion
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,6 +28,7 @@ async def lifespan(app: FastAPI):
     # Startup
     os.makedirs(settings.grabaciones_folder, exist_ok=True)
     os.makedirs(settings.zonas_frames_folder, exist_ok=True)
+    os.makedirs("uploads/evidencias", exist_ok=True)
     init_pool()
     logger.info("App lista ✓")
 
@@ -63,6 +64,7 @@ app.include_router(grabaciones.router)
 app.include_router(monitoreo.router)
 app.include_router(zonas_exclusion.router)
 app.include_router(analisis.router)
+app.include_router(alertas.router)
 
 
 os.makedirs("uploads", exist_ok=True)

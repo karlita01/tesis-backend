@@ -180,6 +180,7 @@ class ResultadoAnalisisOut(BaseModel):
     id: int
     sesion_id: int
     zona_config_id: int | None
+    zona_nombre: str | None          # nombre del sector (de la zona de exclusión)
     personas_maximas: int
     nivel_maximo: str
     tiempo_primera_media_seg: float | None
@@ -188,7 +189,40 @@ class ResultadoAnalisisOut(BaseModel):
     inicio_analisis: str | None
     fin_analisis: str | None
     fecha_registro: str | None
+    frame_evidencia: str | None      # ruta relativa al frame de mayor concentración
+    tipo_dia: str | None             # "Laborable" | "Fin de semana"
 
 
 class HistorialAnalisisOut(BaseModel):
     resultados: list[ResultadoAnalisisOut]
+
+
+class ZonaCriticaOut(BaseModel):
+    zona_id: int
+    zona_nombre: str
+    total_sesiones: int
+    sesiones_con_alerta: int
+    max_personas: int
+    promedio_personas: int
+
+
+class ZonasCriticasOut(BaseModel):
+    zonas: list[ZonaCriticaOut]
+
+
+# ── Alertas — EP-004 ──────────────────────────────────────────────────────────
+
+class AlertaOut(BaseModel):
+    id: int
+    sesion_id: int
+    usuario_id: int | None
+    zona_config_id: int | None
+    nivel: str
+    personas: int
+    atendida: bool
+    fecha_alerta: str | None
+    fecha_atencion: str | None
+
+
+class AlertasListOut(BaseModel):
+    alertas: list[AlertaOut]
