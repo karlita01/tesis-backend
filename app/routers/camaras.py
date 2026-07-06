@@ -8,6 +8,9 @@ router = APIRouter(prefix="/api/camaras", tags=["Cámaras IP"])
 
 
 def _row(c: tuple) -> dict:
+    # 0=id, 1=nombre, 2=direccion_ip, 3=ubicacion, 4=descripcion,
+    # 5=activa, 6=fecha_registro, 7=rtsp_usuario, 8=rtsp_password,
+    # 9=rtsp_puerto, 10=rtsp_canal, 11=rtsp_subtipo
     return {
         "id": c[0],
         "nombre": c[1],
@@ -16,6 +19,11 @@ def _row(c: tuple) -> dict:
         "descripcion": c[4],
         "activa": c[5],
         "fecha_registro": c[6].isoformat() if c[6] else None,
+        "rtsp_usuario": c[7] or "admin",
+        "rtsp_tiene_password": c[8] is not None and c[8] != "",
+        "rtsp_puerto": c[9] or 554,
+        "rtsp_canal": c[10] or 1,
+        "rtsp_subtipo": c[11] if c[11] is not None else 1,
     }
 
 
@@ -24,13 +32,18 @@ def registrar_camara(
     data: CamaraCreate,
     _: dict = Depends(require_admin),
 ):
-    """Registra una cámara IP. Solo guarda la configuración, no verifica conectividad."""
+    """Registra una cámara IP con credenciales RTSP."""
     camara = camara_repo.create_camara(
         nombre=data.nombre,
         direccion_ip=data.direccion_ip,
         ubicacion=data.ubicacion,
         descripcion=data.descripcion,
         activa=data.activa,
+        rtsp_usuario=data.rtsp_usuario,
+        rtsp_password=data.rtsp_password,
+        rtsp_puerto=data.rtsp_puerto,
+        rtsp_canal=data.rtsp_canal,
+        rtsp_subtipo=data.rtsp_subtipo,
     )
     return _row(camara)
 

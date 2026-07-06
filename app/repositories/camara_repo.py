@@ -1,6 +1,12 @@
 from app.database import get_db
 
-_COLS = "id, nombre, direccion_ip, ubicacion, descripcion, activa, fecha_registro"
+_COLS = (
+    "id, nombre, direccion_ip, ubicacion, descripcion, activa, fecha_registro, "
+    "rtsp_usuario, rtsp_password, rtsp_puerto, rtsp_canal, rtsp_subtipo"
+)
+# índices: 0=id, 1=nombre, 2=direccion_ip, 3=ubicacion, 4=descripcion,
+#          5=activa, 6=fecha_registro, 7=rtsp_usuario, 8=rtsp_password,
+#          9=rtsp_puerto, 10=rtsp_canal, 11=rtsp_subtipo
 
 
 def create_camara(
@@ -9,16 +15,24 @@ def create_camara(
     ubicacion: str,
     descripcion: str | None,
     activa: bool,
+    rtsp_usuario: str = "admin",
+    rtsp_password: str | None = None,
+    rtsp_puerto: int = 554,
+    rtsp_canal: int = 1,
+    rtsp_subtipo: int = 1,
 ) -> tuple:
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 f"""
-                INSERT INTO camaras_ip (nombre, direccion_ip, ubicacion, descripcion, activa)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO camaras_ip
+                    (nombre, direccion_ip, ubicacion, descripcion, activa,
+                     rtsp_usuario, rtsp_password, rtsp_puerto, rtsp_canal, rtsp_subtipo)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING {_COLS}
                 """,
-                (nombre, direccion_ip, ubicacion, descripcion, activa),
+                (nombre, direccion_ip, ubicacion, descripcion, activa,
+                 rtsp_usuario, rtsp_password, rtsp_puerto, rtsp_canal, rtsp_subtipo),
             )
             return cur.fetchone()
 

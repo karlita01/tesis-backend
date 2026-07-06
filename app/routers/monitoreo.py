@@ -9,7 +9,7 @@ router = APIRouter(prefix="/api/monitoreo", tags=["Monitoreo"])
 _MENSAJES = {
     "webcam": "Monitoreo iniciado. El video será capturado por el navegador.",
     "grabacion_previa": "Monitoreo iniciado. Usa el endpoint de análisis para procesar el video.",
-    "camara_ip": "Sesión registrada. La conexión real a la cámara IP queda preparada para integración futura.",
+    "camara_ip": "Sesión de cámara IP iniciada. Conecta el stream RTSP.",
 }
 
 
@@ -73,7 +73,12 @@ def detener_monitoreo(
     if sesion[6] != "activo":   # sesion[6] = estado
         raise HTTPException(status_code=409, detail="La sesión ya está detenida.")
 
-    # Guardar resultado de análisis en BD si había una sesión webcam activa
+    # Cancelar hilo RTSP si es sesión de cámara IP
+    if sesion[2] == "camara_ip":
+        from app.core.rtsp_manager import cancel_session as rtsp_cancel
+        rtsp_cancel(sesion_id)
+
+    # Guardar resultado de análisis en BD si había estado activo (webcam o camara_ip)
     estado = eliminar_estado(sesion_id)
     if estado and estado.frames_procesados > 0:
         import os
@@ -105,6 +110,18 @@ def detener_monitoreo(
             fin_analisis=datetime.datetime.now().isoformat(),
             frame_evidencia=evidencia_path,
         )
+
+        if zona_id is not None:
+            from app.repositories import heatmap_repo
+            from detector.yolo_detector import HEATMAP_GRID_ALTO, HEATMAP_GRID_ANCHO
+            try:
+                heatmap_repo.acumular_heatmap(
+                    zona_id, estado.heatmap_grid, HEATMAP_GRID_ANCHO, HEATMAP_GRID_ALTO
+                )
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "Error al acumular heatmap (sesion_id=%s, zona_id=%s)", sesion_id, zona_id
+                )
 
     sesion = monitoreo_repo.detener_sesion(sesion_id)
     result = _row(sesion)

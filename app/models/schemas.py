@@ -37,6 +37,11 @@ class CamaraCreate(BaseModel):
     ubicacion: str = Field(..., min_length=1, max_length=255)
     descripcion: str | None = None
     activa: bool = True
+    rtsp_usuario: str = Field("admin", max_length=100)
+    rtsp_password: str | None = Field(None, max_length=100)
+    rtsp_puerto: int = Field(554, ge=1, le=65535)
+    rtsp_canal: int = Field(1, ge=1)
+    rtsp_subtipo: int = Field(1, ge=0)
 
 
 class CamaraOut(BaseModel):
@@ -47,6 +52,11 @@ class CamaraOut(BaseModel):
     descripcion: str | None
     activa: bool
     fecha_registro: str | None
+    rtsp_usuario: str
+    rtsp_tiene_password: bool   # no se devuelve la contraseña, solo si existe
+    rtsp_puerto: int
+    rtsp_canal: int
+    rtsp_subtipo: int
 
 
 class CamaraEstadoUpdate(BaseModel):
@@ -132,6 +142,18 @@ class ZonaExclusionOut(BaseModel):
 
 class ZonasExclusionListOut(BaseModel):
     configuraciones: list[ZonaExclusionOut]
+
+
+class HeatmapZonaOut(BaseModel):
+    """Mapa de calor de flujo peatonal acumulado para una zona (objetivo de tesis)."""
+    zona_config_id: int
+    zona_nombre: str
+    frame_referencia: str
+    grid: list[list[int]]
+    grid_ancho: int
+    grid_alto: int
+    total_detecciones: int
+    actualizado_en: str | None
 
 
 # ── Sesiones de monitoreo ─────────────────────────────────────────────────────

@@ -27,13 +27,15 @@ _FUENTES_FIJAS = [
     {
         "tipo": "camara_ip",
         "nombre": "Cámara IP registrada",
-        "disponible": False,
-        "nota": "Preparado para integración futura; no se conecta en el prototipo.",
+        "disponible": True,
+        "nota": None,
     },
 ]
 
 
 def _camara_row(c: tuple) -> dict:
+    # índices: 0=id, 1=nombre, 2=ip, 3=ubicacion, 4=descripcion, 5=activa, 6=fecha,
+    #          7=rtsp_usuario, 8=rtsp_password, 9=rtsp_puerto, 10=rtsp_canal, 11=rtsp_subtipo
     return {
         "id": c[0],
         "nombre": c[1],
@@ -42,6 +44,11 @@ def _camara_row(c: tuple) -> dict:
         "descripcion": c[4],
         "activa": c[5],
         "fecha_registro": c[6].isoformat() if c[6] else None,
+        "rtsp_usuario": c[7] or "admin",
+        "rtsp_tiene_password": c[8] is not None and c[8] != "",
+        "rtsp_puerto": c[9] or 554,
+        "rtsp_canal": c[10] or 1,
+        "rtsp_subtipo": c[11] if c[11] is not None else 1,
     }
 
 
@@ -82,7 +89,7 @@ def seleccionar_fuente(
             "grabacion_id": None,
             "mensaje": (
                 f"Cámara IP '{camara[1]}' seleccionada. "
-                "La conexión real queda preparada para integración futura."
+                "Inicia el monitoreo para conectar el stream RTSP."
             ),
         }
 

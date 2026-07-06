@@ -7,9 +7,10 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import ValidationError
 
 from app.config import Settings, get_settings
-from app.core.security import require_admin
-from app.models.schemas import ZonaExclusionOut, ZonaRect, ZonasExclusionListOut
-from app.repositories import zona_exclusion_repo
+from app.core.security import require_admin, require_auth
+from app.models.schemas import HeatmapZonaOut, ZonaExclusionOut, ZonaRect, ZonasExclusionListOut
+from app.repositories import heatmap_repo, zona_exclusion_repo
+from detector.yolo_detector import HEATMAP_GRID_ALTO, HEATMAP_GRID_ANCHO
 
 router = APIRouter(prefix="/api/zonas-exclusion", tags=["Zonas de exclusión"])
 
@@ -113,6 +114,36 @@ def obtener_zona(zona_id: int, payload: dict = Depends(require_admin)):
     if row is None or not row[9]:   # row[9] = activa
         raise HTTPException(status_code=404, detail="Configuración no encontrada.")
     return _row(row)
+
+
+@router.get("/{zona_id}/heatmap", response_model=HeatmapZonaOut)
+def obtener_heatmap(zona_id: int, _: dict = Depends(require_auth)):
+    """
+    Mapa de calor de flujo peatonal acumulado de la zona (objetivo de tesis).
+    Abierto a cualquier usuario autenticado (igual que /api/analisis/zonas-criticas),
+    para que vigilante y administrador lo vean desde el historial.
+    """
+    zona = zona_exclusion_repo.get_zona(zona_id)
+    if zona is None or not zona[9]:   # zona[9] = activa
+        raise HTTPException(status_code=404, detail="Configuración no encontrada.")
+
+    row = heatmap_repo.get_heatmap(zona_id)
+    grid = row[1] if row else [[0] * HEATMAP_GRID_ANCHO for _ in range(HEATMAP_GRID_ALTO)]
+    grid_ancho = row[2] if row else HEATMAP_GRID_ANCHO
+    grid_alto = row[3] if row else HEATMAP_GRID_ALTO
+    total = row[4] if row else 0
+    actualizado = row[5].isoformat() if row and row[5] else None
+
+    return {
+        "zona_config_id": zona_id,
+        "zona_nombre": zona[1],
+        "frame_referencia": zona[2],
+        "grid": grid,
+        "grid_ancho": grid_ancho,
+        "grid_alto": grid_alto,
+        "total_detecciones": total,
+        "actualizado_en": actualizado,
+    }
 
 
 @router.put("/{zona_id}", response_model=ZonaExclusionOut)

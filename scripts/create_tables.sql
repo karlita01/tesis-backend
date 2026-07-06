@@ -137,6 +137,23 @@ CREATE INDEX IF NOT EXISTS idx_alertas_usuario  ON alertas (usuario_id);
 CREATE INDEX IF NOT EXISTS idx_alertas_atendida ON alertas (atendida);
 
 -- =============================================================
+-- Objetivo de tesis — Mapa de calor de flujo peatonal por zona
+-- Acumula, por zona de exclusión, cuántas veces se detectó a una persona
+-- en cada celda de una grilla normalizada. Se sobrescribe (suma) al
+-- finalizar cada sesión de monitoreo/análisis asociada a esa zona.
+-- =============================================================
+
+CREATE TABLE IF NOT EXISTS heatmap_zonas (
+    zona_config_id      INTEGER      PRIMARY KEY
+                             REFERENCES configuraciones_zonas_exclusion(id) ON DELETE CASCADE,
+    grid                JSONB        NOT NULL,   -- matriz [alto][ancho] de conteos acumulados
+    grid_ancho          INTEGER      NOT NULL DEFAULT 32,
+    grid_alto           INTEGER      NOT NULL DEFAULT 18,
+    total_detecciones   INTEGER      NOT NULL DEFAULT 0,
+    actualizado_en      TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- =============================================================
 -- MIGRACIONES — ejecutar solo si la BD ya existe con el esquema anterior
 -- =============================================================
 
@@ -154,3 +171,10 @@ ALTER TABLE sesiones_monitoreo ADD COLUMN IF NOT EXISTS zona_exclusion_id INTEGE
 
 -- EP-005: frame de evidencia (captura del momento de mayor concentración)
 ALTER TABLE resultados_analisis ADD COLUMN IF NOT EXISTS frame_evidencia TEXT;
+
+-- Cámara IP: credenciales RTSP
+ALTER TABLE camaras_ip ADD COLUMN IF NOT EXISTS rtsp_usuario  VARCHAR(100) DEFAULT 'admin';
+ALTER TABLE camaras_ip ADD COLUMN IF NOT EXISTS rtsp_password VARCHAR(100);
+ALTER TABLE camaras_ip ADD COLUMN IF NOT EXISTS rtsp_puerto   INTEGER DEFAULT 554;
+ALTER TABLE camaras_ip ADD COLUMN IF NOT EXISTS rtsp_canal    INTEGER DEFAULT 1;
+ALTER TABLE camaras_ip ADD COLUMN IF NOT EXISTS rtsp_subtipo  INTEGER DEFAULT 1;

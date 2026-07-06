@@ -13,8 +13,9 @@ import json
 import logging
 import os
 import threading
+from urllib.parse import quote_plus
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 
 from app.core.security import require_auth
@@ -25,12 +26,17 @@ from app.models.schemas import (
     ResultadoAnalisisOut,
     ZonasCriticasOut,
 )
-from app.repositories import alerta_repo, analisis_repo, grabacion_repo, monitoreo_repo, zona_exclusion_repo
+from app.core.rtsp_manager import cancel_session as rtsp_cancel, get_session as rtsp_get, set_session as rtsp_set
+from app.core.security import decode_token
+from app.repositories import alerta_repo, analisis_repo, camara_repo, grabacion_repo, heatmap_repo, monitoreo_repo, zona_exclusion_repo
 from detector.yolo_detector import (
+    HEATMAP_GRID_ALTO,
+    HEATMAP_GRID_ANCHO,
     crear_estado,
     eliminar_estado,
     obtener_estado,
     procesar_frame,
+    procesar_rtsp_mjpeg,
     procesar_video_sync,
 )
 
@@ -134,6 +140,7 @@ async def analizar_frame(
     # RF-5.2: guardar frame si supera el máximo histórico de esta sesión
     es_nuevo_maximo = resultado["personas"] > estado.personas_maximas
     alerta = estado.actualizar(resultado["personas"], resultado["nivel"])
+    estado.acumular_heatmap(resultado["detecciones"])
     if es_nuevo_maximo and resultado["personas"] > 0:
         estado.frame_evidencia_bytes = frame_bytes
     resumen = estado.resumen()
@@ -283,6 +290,15 @@ async def stream_analisis_video(
                     fin_analisis=fin_dt.isoformat(),
                     frame_evidencia=evidencia_path,
                 )
+                if zona_id is not None:
+                    try:
+                        heatmap_repo.acumular_heatmap(
+                            zona_id, estado.heatmap_grid, HEATMAP_GRID_ANCHO, HEATMAP_GRID_ALTO
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Error al acumular heatmap (sesion_id=%s, zona_id=%s)", sesion_id, zona_id
+                        )
             eliminar_estado(sesion_id)
 
     return StreamingResponse(
@@ -321,6 +337,241 @@ def obtener_resultado(sesion_id: int, payload: dict = Depends(require_auth)):
     if row is None:
         raise HTTPException(status_code=404, detail="No hay resultado de análisis para esta sesión.")
     return _row_resultado(row)
+
+
+# ── Helpers de sesiones RTSP ─────────────────────────────────────────────────
+
+def _rtsp_session_start(
+    sesion_id: int,
+    rtsp_url: str,
+    config: dict | None,
+    usuario_id: int,
+    zona_id: int | None,
+    loop: asyncio.AbstractEventLoop,
+) -> dict:
+    """Lanza el hilo RTSP y registra el estado compartido para la sesión."""
+    cancelado = threading.Event()
+    estado = crear_estado(sesion_id, zona_config=config)
+    inicio = datetime.datetime.now()
+
+    session_data: dict = {
+        "frame": None,
+        "resultado": None,
+        "alerta": False,
+        "lock": threading.Lock(),
+        "cancelado": cancelado,
+        "estado": estado,
+        "inicio": inicio,
+    }
+
+    rtsp_set(sesion_id, session_data)
+
+    def on_frame(jpeg_bytes, resultado, alerta):
+        with session_data["lock"]:
+            session_data["frame"] = jpeg_bytes
+            session_data["resultado"] = resultado
+            session_data["alerta"] = alerta
+
+        if alerta:
+            try:
+                db_alerta = alerta_repo.crear_alerta(
+                    sesion_id=sesion_id,
+                    usuario_id=usuario_id,
+                    zona_config_id=zona_id,
+                    nivel="alto",
+                    personas=resultado.get("personas", 0),
+                )
+                alerta_manager.publish_from_thread(usuario_id, {
+                    "tipo": "alerta",
+                    "id": db_alerta[0],
+                    "sesion_id": sesion_id,
+                    "nivel": "alto",
+                    "personas": resultado.get("personas", 0),
+                    "fecha_alerta": db_alerta[7].isoformat() if db_alerta[7] else None,
+                }, loop)
+            except Exception:
+                logger.exception("Error al guardar alerta RTSP (sesion_id=%s)", sesion_id)
+
+    def worker():
+        procesar_rtsp_mjpeg(
+            rtsp_url=rtsp_url,
+            zona_config=config,
+            estado=estado,
+            cancelado_fn=cancelado.is_set,
+            on_frame=on_frame,
+        )
+        rtsp_cancel(sesion_id)  # limpia la entrada del manager cuando el hilo termina
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    session_data["thread"] = t
+    return session_data
+
+
+def _build_rtsp_url(camara: tuple) -> str:
+    # índices de camara_repo: 2=direccion_ip, 7=rtsp_usuario, 8=rtsp_password,
+    #                         9=rtsp_puerto, 10=rtsp_canal, 11=rtsp_subtipo
+    ip = camara[2]
+    usuario = quote_plus(camara[7] or "admin")
+    password = quote_plus(camara[8] or "")
+    puerto = camara[9] or 554
+    canal = camara[10] or 1
+    subtipo = camara[11] if camara[11] is not None else 1
+    cred = f"{usuario}:{password}@" if password else f"{usuario}@"
+    return f"rtsp://{cred}{ip}:{puerto}/cam/realmonitor?channel={canal}&subtype={subtipo}"
+
+
+# ── GET /camara/{sesion_id}/mjpeg — stream MJPEG ──────────────────────────────
+
+@router.get("/camara/{sesion_id}/mjpeg")
+async def stream_camara_mjpeg(
+    sesion_id: int,
+    token: str = Query(..., description="JWT token (requerido porque <img> no envía headers)"),
+):
+    """
+    Stream MJPEG con detecciones dibujadas encima.
+    Acepta el JWT como ?token= porque el elemento <img> no puede enviar headers.
+    """
+    payload = decode_token(token)
+    if payload is None:
+        raise HTTPException(status_code=401, detail="Token inválido o expirado.")
+
+    sesion = monitoreo_repo.get_sesion(sesion_id)
+    if sesion is None:
+        raise HTTPException(status_code=404, detail="Sesión no encontrada.")
+    if sesion[2] != "camara_ip":
+        raise HTTPException(status_code=422, detail="Esta sesión no es de cámara IP.")
+    if sesion[6] != "activo":
+        raise HTTPException(status_code=409, detail="La sesión no está activa.")
+    if int(payload["sub"]) != sesion[1] and payload.get("rol") != "administrador":
+        raise HTTPException(status_code=403, detail="No tienes acceso a esta sesión.")
+
+    camara_id = sesion[3]  # sesion[3] = camara_id
+    if camara_id is None:
+        raise HTTPException(status_code=422, detail="La sesión no tiene cámara asociada.")
+
+    camara = camara_repo.get_camara(camara_id)
+    if camara is None:
+        raise HTTPException(status_code=404, detail="Cámara no encontrada.")
+
+    zona_id = sesion[5]
+    usuario_id = sesion[1]
+    config = _zona_config_dict(zona_id)
+    loop = asyncio.get_running_loop()
+
+    # Reutilizar hilo si ya existe, sino iniciarlo
+    session_data = rtsp_get(sesion_id)
+    if session_data is None or session_data["cancelado"].is_set():
+        rtsp_url = _build_rtsp_url(camara)
+        session_data = _rtsp_session_start(sesion_id, rtsp_url, config, usuario_id, zona_id, loop)
+
+    BOUNDARY = b"frame"
+
+    async def mjpeg_generate():
+        try:
+            while True:
+                await asyncio.sleep(0.12)  # ~8 fps máximo
+                with session_data["lock"]:
+                    frame_bytes = session_data["frame"]
+                    cancelado = session_data["cancelado"].is_set()
+                if cancelado and frame_bytes is None:
+                    break
+                if frame_bytes is None:
+                    continue
+                yield (
+                    b"--" + BOUNDARY + b"\r\n"
+                    b"Content-Type: image/jpeg\r\n\r\n"
+                    + frame_bytes
+                    + b"\r\n"
+                )
+        finally:
+            # Detener el hilo si el cliente se desconecta
+            session_data["cancelado"].set()
+
+    return StreamingResponse(
+        mjpeg_generate(),
+        media_type=f"multipart/x-mixed-replace; boundary={BOUNDARY.decode()}",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# ── GET /camara/{sesion_id}/stream — SSE de stats ────────────────────────────
+
+@router.get("/camara/{sesion_id}/stream")
+async def stream_camara_stats(
+    sesion_id: int,
+    payload: dict = Depends(require_auth),
+):
+    """
+    SSE de estadísticas en tiempo real de una sesión de cámara IP.
+    Emite nivel, personas y alerta por cada frame procesado.
+    """
+    sesion = monitoreo_repo.get_sesion(sesion_id)
+    if sesion is None:
+        raise HTTPException(status_code=404, detail="Sesión no encontrada.")
+    if sesion[2] != "camara_ip":
+        raise HTTPException(status_code=422, detail="Esta sesión no es de cámara IP.")
+    if int(payload["sub"]) != sesion[1] and payload.get("rol") != "administrador":
+        raise HTTPException(status_code=403, detail="No tienes acceso a esta sesión.")
+
+    camara_id = sesion[3]
+    if camara_id is None:
+        raise HTTPException(status_code=422, detail="La sesión no tiene cámara asociada.")
+
+    camara = camara_repo.get_camara(camara_id)
+    if camara is None:
+        raise HTTPException(status_code=404, detail="Cámara no encontrada.")
+
+    zona_id = sesion[5]
+    usuario_id = sesion[1]
+    config = _zona_config_dict(zona_id)
+    loop = asyncio.get_running_loop()
+
+    session_data = rtsp_get(sesion_id)
+    if session_data is None or session_data["cancelado"].is_set():
+        rtsp_url = _build_rtsp_url(camara)
+        session_data = _rtsp_session_start(sesion_id, rtsp_url, config, usuario_id, zona_id, loop)
+
+    ultimo_resultado = None
+    keepalive_counter = 0
+
+    async def sse_generate():
+        nonlocal ultimo_resultado, keepalive_counter
+        try:
+            while True:
+                await asyncio.sleep(0.15)
+                keepalive_counter += 1
+                if keepalive_counter >= 100:  # ~15s keepalive
+                    keepalive_counter = 0
+                    yield ": keepalive\n\n"
+                    continue
+
+                with session_data["lock"]:
+                    resultado = session_data["resultado"]
+                    alerta = session_data["alerta"]
+                    cancelado = session_data["cancelado"].is_set()
+
+                if cancelado:
+                    break
+                if resultado is None or resultado is ultimo_resultado:
+                    continue
+
+                ultimo_resultado = resultado
+                ev = {
+                    "tipo": "frame",
+                    "personas": resultado.get("personas", 0),
+                    "nivel": resultado.get("nivel", "sin_aglomeracion"),
+                    "alerta": alerta,
+                }
+                yield f"data: {json.dumps(ev)}\n\n"
+        finally:
+            pass  # el hilo RTSP lo gestiona el endpoint MJPEG
+
+    return StreamingResponse(
+        sse_generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ── GET /zonas-criticas ───────────────────────────────────────────────────────

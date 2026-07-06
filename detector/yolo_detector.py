@@ -116,6 +116,10 @@ def clasificar_nivel(personas: int, umbral_medio: int, umbral_alto: int) -> str:
 # persona de ancho en un encuadre típico de pasillo.
 DISTANCIA_GRUPO_DEFAULT = 0.20
 
+# Grilla de acumulación para el mapa de calor de flujo peatonal (objetivo de tesis).
+HEATMAP_GRID_ANCHO = 32
+HEATMAP_GRID_ALTO = 18
+
 
 def procesar_frame(
     frame_bytes: bytes,
@@ -215,6 +219,24 @@ class SesionAnalisisState:
         self.frames_ventana: deque = deque()   # (timestamp, nivel)
         self.frames_procesados = 0
         self.frame_evidencia_bytes: bytes | None = None  # RF-5.2
+        self.heatmap_grid: list[list[int]] = [
+            [0] * HEATMAP_GRID_ANCHO for _ in range(HEATMAP_GRID_ALTO)
+        ]
+
+    def acumular_heatmap(self, detecciones: list[dict]) -> None:
+        """
+        Suma cada detección no excluida a la celda de la grilla donde cae su
+        bottom-center. Es la base del mapa de calor de flujo peatonal: cuenta
+        presencia acumulada, no aglomeración instantánea.
+        """
+        for d in detecciones:
+            if d.get("excluida"):
+                continue
+            cx = (d["x1"] + d["x2"]) / 2
+            cy = d["y2"]
+            gx = min(HEATMAP_GRID_ANCHO - 1, max(0, int(cx * HEATMAP_GRID_ANCHO)))
+            gy = min(HEATMAP_GRID_ALTO - 1, max(0, int(cy * HEATMAP_GRID_ALTO)))
+            self.heatmap_grid[gy][gx] += 1
 
     def actualizar(self, personas: int, nivel: str) -> bool:
         """
@@ -301,7 +323,7 @@ def procesar_video_sync(
     Procesa un archivo de video frame a frame.
     Llama a callback() con cada evento (dict) para que el caller lo transmita vía SSE.
     """
-    cap = cv2.VideoCapture(ruta_video)
+    cap = cv2.VideoCapture(ruta_video, cv2.CAP_FFMPEG)
     if not cap.isOpened():
         callback({"tipo": "error", "mensaje": "No se pudo abrir el archivo de video."})
         return
@@ -337,6 +359,7 @@ def procesar_video_sync(
             ts_video = round(frame_num / fps, 2)
             es_nuevo_maximo = resultado["personas"] > estado.personas_maximas
             alerta = estado.actualizar(resultado["personas"], resultado["nivel"])
+            estado.acumular_heatmap(resultado["detecciones"])
 
             # RF-5.2: guardar frame con mayor concentración detectada
             if es_nuevo_maximo and resultado["personas"] > 0:
@@ -358,3 +381,130 @@ def procesar_video_sync(
         cap.release()
 
     callback({"tipo": "fin", **estado.resumen()})
+
+
+# ── Dibujo OpenCV para streams MJPEG ─────────────────────────────────────────
+
+def _rect_dashed(img: np.ndarray, x1: int, y1: int, x2: int, y2: int,
+                 color: tuple, dash: int = 8, gap: int = 4, thickness: int = 2):
+    """Dibuja un rectángulo con borde discontinuo."""
+    edges = [
+        ((x1, y1), (x2, y1)),
+        ((x2, y1), (x2, y2)),
+        ((x2, y2), (x1, y2)),
+        ((x1, y2), (x1, y1)),
+    ]
+    for (p1, p2) in edges:
+        dx = p2[0] - p1[0]
+        dy = p2[1] - p1[1]
+        length = max(abs(dx), abs(dy), 1)
+        step = dash + gap
+        for i in range(0, length, step):
+            t0 = i / length
+            t1 = min(i + dash, length) / length
+            s = (int(p1[0] + t0 * dx), int(p1[1] + t0 * dy))
+            e = (int(p1[0] + t1 * dx), int(p1[1] + t1 * dy))
+            cv2.line(img, s, e, color, thickness)
+
+
+def _dibujar_frame_cv2(
+    frame: np.ndarray,
+    detecciones: list,
+    zonas_exclusion: list,
+) -> np.ndarray:
+    """Dibuja zonas de exclusión y bboxes activos sobre el frame. Retorna el frame modificado."""
+    h, w = frame.shape[:2]
+
+    # Zonas de exclusión — violeta punteado (BGR: 247, 85, 168)
+    violet = (247, 85, 168)
+    for zona in zonas_exclusion:
+        zx1 = int(zona["x"] * w)
+        zy1 = int(zona["y"] * h)
+        zx2 = int((zona["x"] + zona["width"]) * w)
+        zy2 = int((zona["y"] + zona["height"]) * h)
+        _rect_dashed(frame, zx1, zy1, zx2, zy2, violet)
+
+    # Detecciones activas — cyan (BGR: 238, 211, 34)
+    cyan = (238, 211, 34)
+    black = (0, 0, 0)
+    for d in detecciones:
+        if d.get("excluida"):
+            continue
+        bx1 = int(d["x1"] * w)
+        by1 = int(d["y1"] * h)
+        bx2 = int(d["x2"] * w)
+        by2 = int(d["y2"] * h)
+        cv2.rectangle(frame, (bx1, by1), (bx2, by2), cyan, 2)
+        label = f"{d['conf']:.0%}"
+        (lw, lh), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+        label_y = max(by1 - 4, lh + 2)
+        cv2.rectangle(frame, (bx1, label_y - lh - 2), (bx1 + lw + 4, label_y + 2), cyan, -1)
+        cv2.putText(frame, label, (bx1 + 2, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, black, 1)
+
+    return frame
+
+
+# ── Procesamiento continuo de stream RTSP ────────────────────────────────────
+
+def procesar_rtsp_mjpeg(
+    rtsp_url: str,
+    zona_config: dict | None,
+    estado: SesionAnalisisState,
+    cancelado_fn,   # callable() → bool
+    on_frame,       # callable(jpeg_bytes: bytes, resultado: dict, alerta: bool) → None
+):
+    """
+    Abre un stream RTSP continuo, procesa cada frame con YOLO+BFS, dibuja
+    detecciones y llama on_frame con el JPEG anotado + stats.
+    Se detiene cuando cancelado_fn() devuelve True o tras 3 fallos seguidos.
+    """
+    cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
+    cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10_000)
+    cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5_000)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+    if not cap.isOpened():
+        on_frame(None, {"tipo": "error", "mensaje": "No se pudo conectar al stream RTSP."}, False)
+        return
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 15.0
+    saltar = max(1, int(fps / 8))
+    frame_num = 0
+    fallos = 0
+
+    zonas_exc = estado.zonas_exclusion
+    umbral_m = estado.umbral_medio
+    umbral_a = estado.umbral_alto
+
+    try:
+        while not (cancelado_fn and cancelado_fn()):
+            ret, frame = cap.read()
+            if not ret:
+                fallos += 1
+                if fallos >= 3:
+                    break
+                time.sleep(0.1)
+                continue
+            fallos = 0
+            frame_num += 1
+            if frame_num % saltar != 0:
+                continue
+
+            _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            resultado = procesar_frame(buf.tobytes(), zonas_exc, umbral_m, umbral_a)
+
+            es_nuevo_maximo = resultado["personas"] > estado.personas_maximas
+            alerta = estado.actualizar(resultado["personas"], resultado["nivel"])
+            estado.acumular_heatmap(resultado["detecciones"])
+
+            if es_nuevo_maximo and resultado["personas"] > 0:
+                _, ev_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                estado.frame_evidencia_bytes = ev_buf.tobytes()
+
+            # Dibujar anotaciones y emitir JPEG
+            frame_anot = frame.copy()
+            _dibujar_frame_cv2(frame_anot, resultado["detecciones"], zonas_exc)
+            _, out_buf = cv2.imencode(".jpg", frame_anot, [cv2.IMWRITE_JPEG_QUALITY, 75])
+            on_frame(out_buf.tobytes(), resultado, alerta)
+    finally:
+        cap.release()
