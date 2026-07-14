@@ -18,7 +18,7 @@ from urllib.parse import quote_plus
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 
-from app.core.security import require_auth
+from app.core.security import require_admin, require_auth
 from app.core.sse_manager import alerta_manager
 from app.models.schemas import (
     FrameAnalisisResult,
@@ -28,10 +28,8 @@ from app.models.schemas import (
 )
 from app.core.rtsp_manager import cancel_session as rtsp_cancel, get_session as rtsp_get, set_session as rtsp_set
 from app.core.security import decode_token
-from app.repositories import alerta_repo, analisis_repo, camara_repo, grabacion_repo, heatmap_repo, monitoreo_repo, zona_exclusion_repo
+from app.repositories import alerta_repo, analisis_repo, camara_repo, grabacion_repo, monitoreo_repo, zona_exclusion_repo
 from detector.yolo_detector import (
-    HEATMAP_GRID_ALTO,
-    HEATMAP_GRID_ANCHO,
     crear_estado,
     eliminar_estado,
     obtener_estado,
@@ -140,7 +138,6 @@ async def analizar_frame(
     # RF-5.2: guardar frame si supera el máximo histórico de esta sesión
     es_nuevo_maximo = resultado["personas"] > estado.personas_maximas
     alerta = estado.actualizar(resultado["personas"], resultado["nivel"])
-    estado.acumular_heatmap(resultado["detecciones"])
     if es_nuevo_maximo and resultado["personas"] > 0:
         estado.frame_evidencia_bytes = frame_bytes
     resumen = estado.resumen()
@@ -219,38 +216,26 @@ async def stream_analisis_video(
     estado = crear_estado(sesion_id, zona_config=config)
     inicio = datetime.datetime.now()
 
+    # Permite que POST /api/monitoreo/{id}/detener cancele de verdad el hilo
+    # en background — sin esto, procesar_video_sync sigue leyendo el archivo
+    # aunque el cliente se desconecte, y el .mp4 queda bloqueado en Windows
+    # (ej. al intentar borrar la grabación justo después de analizarla).
+    cancel_event = threading.Event()
+    rtsp_set(sesion_id, {"cancelado": cancel_event})
+
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue()
 
     def worker():
         def on_event(ev: dict):
+            # Grabación previa: no se crean alertas "en vivo" (RF-4.1/4.3) —
+            # el video ya ocurrió, no hay nada que atender en tiempo real.
+            # El resumen (alerta_activada) igual queda en resultados_analisis
+            # vía estado.resumen(), calculado independientemente de esto.
             asyncio.run_coroutine_threadsafe(queue.put(ev), loop).result(timeout=30)
 
-            # RF-4.3 / RF-4.1: guardar alerta en BD y notificar SSE desde hilo
-            if ev.get("alerta"):
-                try:
-                    db_alerta = alerta_repo.crear_alerta(
-                        sesion_id=sesion_id,
-                        usuario_id=usuario_id,
-                        zona_config_id=zona_id,
-                        nivel="alto",
-                        personas=ev.get("personas", 0),
-                    )
-                    alerta_manager.publish_from_thread(usuario_id, {
-                        "tipo": "alerta",
-                        "id": db_alerta[0],
-                        "sesion_id": sesion_id,
-                        "nivel": "alto",
-                        "personas": ev.get("personas", 0),
-                        "fecha_alerta": db_alerta[7].isoformat() if db_alerta[7] else None,
-                    }, loop)
-                except Exception:
-                    logger.exception(
-                        "Error al guardar/publicar alerta en stream (sesion_id=%s)", sesion_id
-                    )
-
         try:
-            procesar_video_sync(ruta_video, config, estado, callback=on_event)
+            procesar_video_sync(ruta_video, config, estado, callback=on_event, cancelado_fn=cancel_event.is_set)
         except Exception as exc:
             asyncio.run_coroutine_threadsafe(
                 queue.put({"tipo": "error", "mensaje": str(exc)}), loop
@@ -290,16 +275,8 @@ async def stream_analisis_video(
                     fin_analisis=fin_dt.isoformat(),
                     frame_evidencia=evidencia_path,
                 )
-                if zona_id is not None:
-                    try:
-                        heatmap_repo.acumular_heatmap(
-                            zona_id, estado.heatmap_grid, HEATMAP_GRID_ANCHO, HEATMAP_GRID_ALTO
-                        )
-                    except Exception:
-                        logger.exception(
-                            "Error al acumular heatmap (sesion_id=%s, zona_id=%s)", sesion_id, zona_id
-                        )
             eliminar_estado(sesion_id)
+            rtsp_cancel(sesion_id)
 
     return StreamingResponse(
         generate(),
@@ -320,6 +297,23 @@ def obtener_historial(payload: dict = Depends(require_auth)):
     usuario_id = int(payload["sub"])
     rows = analisis_repo.list_resultados(usuario_id=None if es_admin else usuario_id)
     return {"resultados": [_row_resultado(r) for r in rows]}
+
+
+@router.delete("/resultado/{resultado_id}", status_code=204)
+def eliminar_resultado(
+    resultado_id: int,
+    _: dict = Depends(require_admin),
+):
+    """Elimina un resultado del historial (y su captura de evidencia, si existe). Solo administrador."""
+    row = analisis_repo.delete_resultado(resultado_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Resultado no encontrado.")
+    evidencia_path = row[0]
+    if evidencia_path and os.path.exists(evidencia_path):
+        try:
+            os.remove(evidencia_path)
+        except OSError:
+            logger.exception("Error al borrar frame de evidencia (resultado_id=%s)", resultado_id)
 
 
 # ── GET /resultado/{sesion_id} ────────────────────────────────────────────────

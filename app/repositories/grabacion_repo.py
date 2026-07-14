@@ -48,3 +48,9 @@ def get_grabacion(grabacion_id: int) -> tuple | None:
         with conn.cursor() as cur:
             cur.execute(f"SELECT {_COLS} FROM grabaciones WHERE id = %s", (grabacion_id,))
             return cur.fetchone()
+
+
+def delete_grabacion(grabacion_id: int) -> None:
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM grabaciones WHERE id = %s", (grabacion_id,))

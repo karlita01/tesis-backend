@@ -73,10 +73,22 @@ def detener_monitoreo(
     if sesion[6] != "activo":   # sesion[6] = estado
         raise HTTPException(status_code=409, detail="La sesión ya está detenida.")
 
-    # Cancelar hilo RTSP si es sesión de cámara IP
-    if sesion[2] == "camara_ip":
+    # Cancelar hilo en background (RTSP para cámara IP, procesamiento para grabación previa)
+    if sesion[2] in ("camara_ip", "grabacion_previa"):
         from app.core.rtsp_manager import cancel_session as rtsp_cancel
         rtsp_cancel(sesion_id)
+
+    # grabacion_previa guarda su propio resultado en el `finally` del stream SSE
+    # (GET /api/analisis/video/{id}/stream) cuando el hilo en background nota la
+    # cancelación — si también lo guardáramos acá se duplicaría la fila en
+    # resultados_analisis (dos INSERT con frames_procesados ligeramente distintos,
+    # por la carrera entre este endpoint y el hilo que sigue procesando un frame
+    # más antes de notar el cancel_event).
+    if sesion[2] == "grabacion_previa":
+        sesion = monitoreo_repo.detener_sesion(sesion_id)
+        result = _row(sesion)
+        result["mensaje"] = "Monitoreo detenido correctamente."
+        return result
 
     # Guardar resultado de análisis en BD si había estado activo (webcam o camara_ip)
     estado = eliminar_estado(sesion_id)
@@ -110,18 +122,6 @@ def detener_monitoreo(
             fin_analisis=datetime.datetime.now().isoformat(),
             frame_evidencia=evidencia_path,
         )
-
-        if zona_id is not None:
-            from app.repositories import heatmap_repo
-            from detector.yolo_detector import HEATMAP_GRID_ALTO, HEATMAP_GRID_ANCHO
-            try:
-                heatmap_repo.acumular_heatmap(
-                    zona_id, estado.heatmap_grid, HEATMAP_GRID_ANCHO, HEATMAP_GRID_ALTO
-                )
-            except Exception:
-                logging.getLogger(__name__).exception(
-                    "Error al acumular heatmap (sesion_id=%s, zona_id=%s)", sesion_id, zona_id
-                )
 
     sesion = monitoreo_repo.detener_sesion(sesion_id)
     result = _row(sesion)

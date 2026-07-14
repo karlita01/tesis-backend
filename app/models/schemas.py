@@ -144,18 +144,6 @@ class ZonasExclusionListOut(BaseModel):
     configuraciones: list[ZonaExclusionOut]
 
 
-class HeatmapZonaOut(BaseModel):
-    """Mapa de calor de flujo peatonal acumulado para una zona (objetivo de tesis)."""
-    zona_config_id: int
-    zona_nombre: str
-    frame_referencia: str
-    grid: list[list[int]]
-    grid_ancho: int
-    grid_alto: int
-    total_detecciones: int
-    actualizado_en: str | None
-
-
 # ── Sesiones de monitoreo ─────────────────────────────────────────────────────
 
 class MonitoreoIniciarRequest(BaseModel):

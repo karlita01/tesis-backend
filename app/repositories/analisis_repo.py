@@ -90,6 +90,16 @@ def list_resultados(usuario_id: int | None = None) -> list[tuple]:
             return cur.fetchall()
 
 
+def delete_resultado(resultado_id: int) -> tuple | None:
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM resultados_analisis WHERE id = %s RETURNING frame_evidencia",
+                (resultado_id,),
+            )
+            return cur.fetchone()
+
+
 def get_zonas_criticas() -> list[tuple]:
     """
     RF-5.5: Agrega resultados por zona de exclusión.

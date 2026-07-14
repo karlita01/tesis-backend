@@ -21,6 +21,13 @@ import numpy as np
 
 _model = None
 _model_lock = Lock()
+# Serializa TODAS las llamadas de inferencia (no solo la carga). torch/ultralytics
+# en CPU no es seguro ante llamadas concurrentes desde hilos distintos: bajo carga
+# (varias sesiones de análisis en paralelo) puede disparar un subproceso interno de
+# multiprocessing que en Windows a veces hereda el socket del servidor y lo deja
+# colgado. Sin este lock, cada hilo (webcam, video previa, cámara IP) llamaba a
+# model(frame, ...) al mismo tiempo sobre la misma instancia compartida.
+_inference_lock = Lock()
 
 NIVEL_ORDEN = ["sin_aglomeracion", "bajo", "medio", "alto"]
 
@@ -31,7 +38,7 @@ def _get_model():
         with _model_lock:
             if _model is None:
                 from ultralytics import YOLO
-                _model = YOLO("yolov8n.pt")
+                _model = YOLO("yolov8s.pt")
     return _model
 
 
@@ -116,10 +123,6 @@ def clasificar_nivel(personas: int, umbral_medio: int, umbral_alto: int) -> str:
 # persona de ancho en un encuadre típico de pasillo.
 DISTANCIA_GRUPO_DEFAULT = 0.20
 
-# Grilla de acumulación para el mapa de calor de flujo peatonal (objetivo de tesis).
-HEATMAP_GRID_ANCHO = 32
-HEATMAP_GRID_ALTO = 18
-
 
 def procesar_frame(
     frame_bytes: bytes,
@@ -143,7 +146,9 @@ def procesar_frame(
 
     h, w = frame.shape[:2]
     model = _get_model()
-    results = model(frame, classes=[0], conf=conf_min, verbose=False)[0]
+    with _inference_lock:
+        # imgsz reducido (default YOLO es 640) para sostener más fps en CPU (RNF-01)
+        results = model(frame, classes=[0], conf=conf_min, imgsz=416, verbose=False)[0]
 
     bottom_centers: list[tuple[float, float]] = []
     detecciones = []
@@ -219,24 +224,6 @@ class SesionAnalisisState:
         self.frames_ventana: deque = deque()   # (timestamp, nivel)
         self.frames_procesados = 0
         self.frame_evidencia_bytes: bytes | None = None  # RF-5.2
-        self.heatmap_grid: list[list[int]] = [
-            [0] * HEATMAP_GRID_ANCHO for _ in range(HEATMAP_GRID_ALTO)
-        ]
-
-    def acumular_heatmap(self, detecciones: list[dict]) -> None:
-        """
-        Suma cada detección no excluida a la celda de la grilla donde cae su
-        bottom-center. Es la base del mapa de calor de flujo peatonal: cuenta
-        presencia acumulada, no aglomeración instantánea.
-        """
-        for d in detecciones:
-            if d.get("excluida"):
-                continue
-            cx = (d["x1"] + d["x2"]) / 2
-            cy = d["y2"]
-            gx = min(HEATMAP_GRID_ANCHO - 1, max(0, int(cx * HEATMAP_GRID_ANCHO)))
-            gy = min(HEATMAP_GRID_ALTO - 1, max(0, int(cy * HEATMAP_GRID_ALTO)))
-            self.heatmap_grid[gy][gx] += 1
 
     def actualizar(self, personas: int, nivel: str) -> bool:
         """
@@ -336,8 +323,8 @@ def procesar_video_sync(
     umbral_m = estado.umbral_medio
     umbral_a = estado.umbral_alto
 
-    # Procesar ~8 fps máximo para mantener latencia razonable
-    saltar = max(1, int(fps / 8))
+    # Procesar ~10 fps máximo (RNF-01) para mantener latencia razonable
+    saltar = max(1, int(fps / 10))
 
     try:
         while True:
@@ -359,7 +346,6 @@ def procesar_video_sync(
             ts_video = round(frame_num / fps, 2)
             es_nuevo_maximo = resultado["personas"] > estado.personas_maximas
             alerta = estado.actualizar(resultado["personas"], resultado["nivel"])
-            estado.acumular_heatmap(resultado["detecciones"])
 
             # RF-5.2: guardar frame con mayor concentración detectada
             if es_nuevo_maximo and resultado["personas"] > 0:
@@ -468,7 +454,7 @@ def procesar_rtsp_mjpeg(
         return
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 15.0
-    saltar = max(1, int(fps / 8))
+    saltar = max(1, int(fps / 10))
     frame_num = 0
     fallos = 0
 
@@ -495,7 +481,6 @@ def procesar_rtsp_mjpeg(
 
             es_nuevo_maximo = resultado["personas"] > estado.personas_maximas
             alerta = estado.actualizar(resultado["personas"], resultado["nivel"])
-            estado.acumular_heatmap(resultado["detecciones"])
 
             if es_nuevo_maximo and resultado["personas"] > 0:
                 _, ev_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
