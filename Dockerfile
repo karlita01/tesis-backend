@@ -24,6 +24,11 @@ RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Diagnóstico: prueba cv2.resize con un ndarray puro, SIN pasar por ultralytics/torch,
+# para aislar si el problema es numpy+opencv a secas o algo que el pipeline de
+# ultralytics le hace al array antes de llegar al resize.
+RUN python -c "import cv2, numpy as np; img = np.zeros((480,640,3), dtype=np.uint8); out = cv2.resize(img, (416,416)); print('cv2.resize directo OK:', out.shape)"
+
 # Descarga los pesos de YOLOv8 AHORA (en el build, con red garantizada) para que
 # queden dentro de la imagen. El .pt está en .gitignore a propósito (no se sube a git),
 # así que sin este paso el contenedor lo intentaría descargar en cada arranque.
