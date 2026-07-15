@@ -9,7 +9,7 @@ WORKDIR /app
 # - libpq5: cliente de PostgreSQL (psycopg2-binary lo necesita en el sistema)
 # - libgomp1: runtime OpenMP (numpy/torch lo usan por debajo)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
     libsm6 \
     libxext6 \
