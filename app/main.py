@@ -54,8 +54,13 @@ async def lifespan(app: FastAPI):
     import time as _time
     from detector.yolo_detector import DEVICE as _device, warmup as warmup_modelo
     t0 = _time.time()
-    warmup_modelo()
-    logger.info("Modelo YOLO precargado en %s (%.2fs)", _device, _time.time() - t0)
+    try:
+        warmup_modelo()
+        logger.info("Modelo YOLO precargado en %s (%.2fs)", _device, _time.time() - t0)
+    except Exception:
+        # El warmup es solo una optimización (evita el retraso en la primera
+        # detección real). Si falla, no debe tumbar el arranque de toda la app.
+        logger.exception("No se pudo precargar el modelo YOLO en el warmup")
 
     logger.info("App lista ✓")
 
