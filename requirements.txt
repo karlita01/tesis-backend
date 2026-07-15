@@ -9,6 +9,8 @@ bcrypt==4.0.1                 # pin: passlib 1.7.4 no soporta bcrypt >=4.1
 psycopg2-binary==2.9.9        # PostgreSQL
 python-dotenv==1.0.1          # carga el .env
 opencv-python-headless==4.10.0.84  # procesamiento de video (sin libs gráficas del SO, para hosts Linux en la nube)
+numpy==1.26.4                  # pin: evita que pip resuelva un pandas incompatible con esta numpy
+pandas==2.2.2                  # pin: pandas 3.x rompe con numpy 1.26 (usado internamente por ultralytics)
 ultralytics==8.2.91           # YOLOv8
 
 # torch/torchvision NO están aquí a propósito: se instalan aparte (build CPU explícita)
