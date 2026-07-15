@@ -8,7 +8,7 @@ passlib[bcrypt]==1.7.4        # hashing de contraseñas
 bcrypt==4.0.1                 # pin: passlib 1.7.4 no soporta bcrypt >=4.1
 psycopg2-binary==2.9.9        # PostgreSQL
 python-dotenv==1.0.1          # carga el .env
-opencv-python-headless==4.8.1.78  # procesamiento de video (sin libs gráficas del SO, para hosts Linux en la nube)
+opencv-python==4.10.0.84       # procesamiento de video (requiere libs gráficas del SO, instaladas en el Dockerfile)
 numpy==1.26.4                  # pin: ultralytics 8.2.91 exige numpy<2.0.0
 pandas==2.2.2                  # pin: evita resolver un pandas 3.x incompatible
 # Nota: pandas 2.2.2 + numpy 1.26.4 tiene un bug binario conocido en un DataFrame
