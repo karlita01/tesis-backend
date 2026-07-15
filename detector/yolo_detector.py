@@ -14,9 +14,9 @@ import time
 from collections import deque
 from threading import Lock
 
+import torch
 import cv2
 import numpy as np
-import torch
 
 # ── Modelo YOLO (carga perezosa, una sola instancia) ──────────────────────────
 
