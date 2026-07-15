@@ -33,11 +33,50 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 NIVEL_ORDEN = ["sin_aglomeracion", "bajo", "medio", "alto"]
 
 
+def _parchear_export_formats() -> None:
+    """
+    Evita un bug de compatibilidad binaria pandas/numpy observado en despliegues
+    en la nube (pandas 2.2.2 + numpy 1.26 revientan al construir un DataFrame,
+    con "TypeError: Cannot convert numpy.ndarray to numpy.ndarray"). Ese DataFrame
+    lo arma internamente AutoBackend._model_type() solo para leer la columna
+    "Suffix" y así detectar el tipo de archivo del modelo (.pt, .onnx, etc.).
+    En este proyecto siempre se carga un .pt plano, así que reemplazamos esa
+    función por una versión sin pandas, con exactamente los mismos datos.
+    """
+    import ultralytics.nn.autobackend as autobackend_module
+
+    class _TablaFormatos:
+        def __init__(self, filas: list[list]) -> None:
+            self.Suffix = [f[2] for f in filas]
+            self.Argument = [f[1] for f in filas]
+            self.CPU = [f[3] for f in filas]
+            self.GPU = [f[4] for f in filas]
+
+    _FILAS = [
+        ["PyTorch", "-", ".pt", True, True],
+        ["TorchScript", "torchscript", ".torchscript", True, True],
+        ["ONNX", "onnx", ".onnx", True, True],
+        ["OpenVINO", "openvino", "_openvino_model", True, False],
+        ["TensorRT", "engine", ".engine", False, True],
+        ["CoreML", "coreml", ".mlpackage", True, False],
+        ["TensorFlow SavedModel", "saved_model", "_saved_model", True, True],
+        ["TensorFlow GraphDef", "pb", ".pb", True, True],
+        ["TensorFlow Lite", "tflite", ".tflite", True, False],
+        ["TensorFlow Edge TPU", "edgetpu", "_edgetpu.tflite", True, False],
+        ["TensorFlow.js", "tfjs", "_web_model", True, False],
+        ["PaddlePaddle", "paddle", "_paddle_model", True, True],
+        ["NCNN", "ncnn", "_ncnn_model", True, True],
+    ]
+
+    autobackend_module.export_formats = lambda: _TablaFormatos(_FILAS)
+
+
 def _get_model():
     global _model
     if _model is None:
         with _model_lock:
             if _model is None:
+                _parchear_export_formats()
                 from ultralytics import YOLO
                 # .to(DEVICE) resetea internamente model.predictor a None (ver
                 # Model._apply en ultralytics). Debe terminar ANTES de publicar

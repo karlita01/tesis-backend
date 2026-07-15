@@ -9,8 +9,11 @@ bcrypt==4.0.1                 # pin: passlib 1.7.4 no soporta bcrypt >=4.1
 psycopg2-binary==2.9.9        # PostgreSQL
 python-dotenv==1.0.1          # carga el .env
 opencv-python-headless==4.10.0.84  # procesamiento de video (sin libs gráficas del SO, para hosts Linux en la nube)
-numpy==2.0.2                   # pin: el wheel de pandas 2.2.2 está compilado contra numpy>=2.0
-pandas==2.2.2                  # pin: pandas 3.x más reciente daba otro conflicto (usado internamente por ultralytics)
+numpy==1.26.4                  # pin: ultralytics 8.2.91 exige numpy<2.0.0
+pandas==2.2.2                  # pin: evita resolver un pandas 3.x incompatible
+# Nota: pandas 2.2.2 + numpy 1.26.4 tiene un bug binario conocido en un DataFrame
+# interno de ultralytics (AutoBackend._model_type). Se evita con un parche en
+# detector/yolo_detector.py que reemplaza esa función para no usar pandas ahí.
 ultralytics==8.2.91           # YOLOv8
 
 # torch/torchvision NO están aquí a propósito: se instalan aparte (build CPU explícita)
