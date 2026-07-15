@@ -19,7 +19,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # y reinstalar limpio solo headless evita archivos .so mezclados de los dos paquetes
 # conviviendo en la misma carpeta cv2/ (causa errores binarios raros en runtime).
 RUN pip uninstall -y opencv-python opencv-python-headless || true
-RUN pip install --no-cache-dir opencv-python-headless==4.10.0.84
+RUN pip install --no-cache-dir opencv-python-headless==4.8.1.78
 # Blindaje final: garantiza esta numpy exacta pase lo que pase con los pasos anteriores
 RUN pip install --no-cache-dir --force-reinstall numpy==1.26.4
 
