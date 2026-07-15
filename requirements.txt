@@ -8,7 +8,7 @@ passlib[bcrypt]==1.7.4        # hashing de contraseñas
 bcrypt==4.0.1                 # pin: passlib 1.7.4 no soporta bcrypt >=4.1
 psycopg2-binary==2.9.9        # PostgreSQL
 python-dotenv==1.0.1          # carga el .env
-opencv-python==4.10.0.84      # procesamiento de video
+opencv-python-headless==4.10.0.84  # procesamiento de video (sin libs gráficas del SO, para hosts Linux en la nube)
 ultralytics==8.2.91           # YOLOv8
 
 # torch/torchvision con soporte CUDA (GPU). Instalar por separado con:

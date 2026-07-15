@@ -49,6 +49,7 @@ def _camara_row(c: tuple) -> dict:
         "rtsp_puerto": c[9] or 554,
         "rtsp_canal": c[10] or 1,
         "rtsp_subtipo": c[11] if c[11] is not None else 1,
+        "zona_exclusion_id": c[12],
     }
 
 
