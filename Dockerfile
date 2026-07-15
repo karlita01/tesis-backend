@@ -18,16 +18,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-# torch/torchvision: build CPU explícita, evita bajar CUDA (Railway no tiene GPU)
-RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch torchvision
+# torch/torchvision: build CPU explícita, evita bajar CUDA (Railway no tiene GPU).
+# Versión fijada (no la más nueva): sospecha de conflicto de threads (OpenMP)
+# entre una build de torch muy reciente y esta versión de opencv.
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.1.2 torchvision==0.16.2
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Diagnóstico: prueba cv2.resize con un ndarray puro, SIN pasar por ultralytics/torch,
-# para aislar si el problema es numpy+opencv a secas o algo que el pipeline de
-# ultralytics le hace al array antes de llegar al resize.
-RUN python -c "import cv2, numpy as np; img = np.zeros((480,640,3), dtype=np.uint8); out = cv2.resize(img, (416,416)); print('cv2.resize directo OK:', out.shape)"
+# Diagnóstico: prueba cv2.resize DESPUÉS de importar torch (orden real de la app),
+# para confirmar si el conflicto es específicamente por tener ambos cargados juntos.
+RUN python -c "import torch; import cv2, numpy as np; img = np.zeros((480,640,3), dtype=np.uint8); out = cv2.resize(img, (416,416)); print('cv2.resize con torch importado OK:', out.shape)"
 
 # Descarga los pesos de YOLOv8 AHORA (en el build, con red garantizada) para que
 # queden dentro de la imagen. El .pt está en .gitignore a propósito (no se sube a git),
