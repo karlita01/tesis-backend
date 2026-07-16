@@ -106,7 +106,10 @@ def warmup() -> None:
         # Envuelto en lista: un ndarray "pelado" puede terminar iterado por su
         # primer eje (cada fila de píxeles) en vez de tratado como una sola
         # imagen, rompiendo el preprocesamiento interno de ultralytics.
-        model([frame_dummy], classes=[0], conf=0.40, imgsz=416, device=DEVICE, verbose=False)
+        # Sin device=: el modelo ya fue movido a DEVICE con .to() en _get_model();
+        # re-especificarlo aquí puede disparar una reinicialización interna del
+        # backend en modo CPU que rompe el preprocesamiento (cv2.resize).
+        model([frame_dummy], classes=[0], conf=0.40, imgsz=416, verbose=False)
 
 
 # ── Lógica de detección ───────────────────────────────────────────────────────
@@ -215,7 +218,8 @@ def procesar_frame(
     model = _get_model()
     with _inference_lock:
         # imgsz reducido (default YOLO es 640) para sostener más fps (RNF-01)
-        results = model(frame, classes=[0], conf=conf_min, imgsz=416, device=DEVICE, verbose=False)[0]
+        # Sin device=: el modelo ya está en DEVICE por .to() en _get_model().
+        results = model(frame, classes=[0], conf=conf_min, imgsz=416, verbose=False)[0]
 
     bottom_centers: list[tuple[float, float]] = []
     detecciones = []
